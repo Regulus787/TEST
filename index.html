@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Annotation Tool with Screen Recording</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+        #toolbar {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 16.67%; /* 1/6 비율 */
+            height: 100%;
+            background: white;
+            padding: 10px;
+            border-left: 1px solid black;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            z-index: 10;
+        }
+        #toolbar button,
+        #toolbar input {
+            margin: 5px 0;
+            width: 100%;
+        }
+        #pdf-container {
+            flex: 1;
+            overflow-y: scroll;
+            padding: 10px;
+            margin-right: 16.67%; /* 1/6 비율 */
+            box-sizing: border-box;
+        }
+        .pdf-page {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        .pdf-canvas {
+            border: 1px solid black;
+            width: 100%;
+            height: auto;
+        }
+        .annotation-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        video {
+            display: none;
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            width: 150px;
+            height: 150px;
+            border: 1px solid black;
+            z-index: 20;
+        }
+
+        @media (max-width: 800px) {
+            #toolbar {
+                width: 20%; /* 1/5 비율 */
+            }
+            #pdf-container {
+                margin-right: 20%; /* 1/5 비율 */
+            }
+        }
+
+        @media (max-width: 600px) {
+            #toolbar {
+                width: 10%; /* 1/10 비율 */
+            }
+            #pdf-container {
+                margin-right: 10%; /* 1/10 비율 */
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <button onclick="enableDrawing()">Draw</button>
+        <button onclick="enableErasing()">Erase</button>
+        <button onclick="enableHighlighting()">Highlight</button>
+        <button onclick="savePDF()">Save PDF</button>
+        <button onclick="startRecording()">Start Recording</button>
+        <button onclick="stopRecording()">Stop Recording</button>
+        <label for="drawColorPicker">Draw Color:</label>
+        <input type="color" id="drawColorPicker" value="#000000">
+        <label for="highlightColorPicker">Highlight Color:</label>
+        <input type="color" id="highlightColorPicker" value="#FFFF00">
+        <label for="pageInput">Go to page:</label>
+        <input type="number" id="pageInput" min="1" value="1">
+        <button onclick="goToPage()">Go</button>
+    </div>
+    <div id="pdf-container"></div>
+    <video id="webcam" autoplay muted></video>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.3.1/jspdf.umd.min.js"></script>
+    <script>
+        var url = 'test.pdf';  // PDF 파일의 경로를 입력하세요
+        var pdfjsLib = window['pdfjs-dist/build/pdf'];
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
+
+        var pdfDoc = null,
+            isDrawing = false,
+            isErasing = false,
+            isHighlighting = false,
+            drawColorPicker = document.getElementById('drawColorPicker'),
+            highlightColorPicker = document.getElementById('highlightColorPicker'),
+            annotations = {},  // 페이지별 주석 데이터를 저장하는 객체
+            mediaRecorder,
+            recordedChunks = [];
+
+        pdfjsLib.getDocument(url).promise.then(function(pdfDoc_) {
+            pdfDoc = pdfDoc_;
+            renderAllPages();
+        });
+
+        function renderAllPages() {
+            for (let num = 1; num <= pdfDoc.numPages; num++) {
+                renderPage(num);
+            }
+        }
+
+        function renderPage(num) {
+            pdfDoc.getPage(num).then(function(page) {
+                var viewport = page.getViewport({ scale: 1 });
+                
+                var pageContainer = document.createElement('div');
+                pageContainer.className = 'pdf-page';
+                pageContainer.id = `pageContainer-${num}`;
+
+                var canvas = document.createElement('canvas');
+                canvas.className = 'pdf-canvas';
+                var ctx = canvas.getContext('2d');
+
+                var annotationCanvas = document.createElement('canvas');
+                annotationCanvas.className = 'annotation-layer';
+                var annotationCtx = annotationCanvas.getContext('2d');
+
+                pageContainer.appendChild(canvas);
+                pageContainer.appendChild(annotationCanvas);
+                document.getElementById('pdf-container').appendChild(pageContainer);
+
+                function render() {
+                    var containerWidth = pageContainer.clientWidth;
+                    var scale = containerWidth / viewport.width;
+                    var scaledViewport = page.getViewport({ scale: scale });
+
+                    canvas.width = scaledViewport.width;
+                    canvas.height = scaledViewport.height;
+                    annotationCanvas.width = scaledViewport.width;
+                    annotationCanvas.height = scaledViewport.height;
+
+                    var renderContext = {
+                        canvasContext: ctx,
+                        viewport: scaledViewport
+                    };
+                    page.render(renderContext).promise.then(function() {
+                        // 주석을 다시 그립니다.
+                        if (annotations[num]) {
+                            var img = new Image();
+                            img.src = annotations[num];
+                            img.onload = function() {
+                                annotationCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+                                annotationCtx.drawImage(img, 0, 0);
+                            }
+                        } else {
+                            annotationCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+                        }
+
+                        addDrawingEvents(annotationCanvas, annotationCtx, num);
+                    });
+                }
+
+                window.addEventListener('resize', render);
+                render();
+            });
+        }
+
+        function enableDrawing() {
+            isDrawing = true;
+            isErasing = false;
+            isHighlighting = false;
+        }
+
+        function enableErasing() {
+            isDrawing = false;
+            isErasing = true;
+            isHighlighting = false;
+        }
+
+        function enableHighlighting() {
+            isDrawing = false;
+            isErasing = false;
+            isHighlighting = true;
+        }
+
+        function addDrawingEvents(canvas, ctx, pageNum) {
+            let drawing = false;
+
+            canvas.addEventListener('pointerdown', function(e) {
+                if (e.pointerType === 'pen' || e.pointerType === 'mouse' || (e.pointerType === 'touch' && e.shiftKey)) {
+                    if (isDrawing) {
+                        startDrawing(e, ctx, pageNum);
+                    } else if (isErasing) {
+                        startErasing(e, ctx, pageNum);
+                    } else if (isHighlighting) {
+                        startHighlighting(e, ctx, pageNum);
+                    }
+                    drawing = true;
+                }
+            });
+
+            canvas.addEventListener('pointermove', function(e) {
+                if (drawing) {
+                    if (isDrawing) {
+                        draw(e, ctx);
+                    } else if (isErasing) {
+                        erase(e, ctx);
+                    } else if (isHighlighting) {
+                        highlight(e, ctx);
+                    }
+                }
+            });
+
+            canvas.addEventListener('pointerup', function() {
+                if (drawing) {
+                    stopDrawingErasingHighlighting(ctx, pageNum);
+                    drawing = false;
+                }
+            });
+
+            canvas.addEventListener('pointerleave', function() {
+                if (drawing) {
+                    stopDrawingErasingHighlighting(ctx, pageNum);
+                    drawing = false;
+                }
+            });
+
+            canvas.addEventListener('pointerdown', function(e) {
+                if (e.pointerType === 'touch' && !e.shiftKey) {
+                    // 위치 조절 기능 (패닝)
+                    canvas.style.cursor = 'grabbing';
+                    let startX = e.pageX - canvas.offsetLeft;
+                    let startY = e.pageY - canvas.offsetTop;
+                    let scrollLeft = canvas.parentElement.scrollLeft;
+                    let scrollTop = canvas.parentElement.scrollTop;
+
+                    function moveHandler(e) {
+                        const x = e.pageX - canvas.offsetLeft;
+                        const y = e.pageY - canvas.offsetTop;
+                        canvas.parentElement.scrollLeft = scrollLeft - (x - startX);
+                        canvas.parentElement.scrollTop = scrollTop - (y - startY);
+                    }
+
+                    function upHandler() {
+                        canvas.style.cursor = 'default';
+                        window.removeEventListener('pointermove', moveHandler);
+                        window.removeEventListener('pointerup', upHandler);
+                    }
+
+                    window.addEventListener('pointermove', moveHandler);
+                    window.addEventListener('pointerup', upHandler);
+                }
+            });
+        }
+
+        function startDrawing(e, ctx, pageNum) {
+            ctx.strokeStyle = drawColorPicker.value;
+            ctx.lineWidth = 2;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        }
+
+        function draw(e, ctx) {
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        }
+
+        function startErasing(e, ctx, pageNum) {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.lineWidth = 10;
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        }
+
+        function erase(e, ctx) {
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        }
+
+        function startHighlighting(e, ctx, pageNum) {
+            ctx.strokeStyle = highlightColorPicker.value;
+            ctx.lineWidth = 10;
+            ctx.globalCompositeOperation = 'multiply';
+            ctx.globalAlpha = 0.1;
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        }
+
+        function highlight(e, ctx) {
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        }
+
+        function stopDrawingErasingHighlighting(ctx, pageNum) {
+            ctx.closePath();
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = 1.0;
+            saveCurrentAnnotations(pageNum, ctx);
+        }
+
+        function saveCurrentAnnotations(pageNum, ctx) {
+            annotations[pageNum] = ctx.canvas.toDataURL();
+        }
+
+        async function savePDF() {
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF();
+            
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                const page = await pdfDoc.getPage(i);
+                const viewport = page.getViewport({ scale: 1.5 });
+                
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+                const imgData = canvas.toDataURL('image/png');
+
+                if (i > 1) {
+                    pdf.addPage();
+                }
+                pdf.addImage(imgData, 'PNG', 0, 0, pdf.internal.pageSize.width, pdf.internal.pageSize.height);
+
+                if (annotations[i]) {
+                    const annotationImg = new Image();
+                    annotationImg.src = annotations[i];
+                    await new Promise((resolve) => {
+                        annotationImg.onload = () => {
+                            const annotationCanvas = document.createElement('canvas');
+                            annotationCanvas.width = viewport.width;
+                            annotationCanvas.height = viewport.height;
+                            const annotationCtx = annotationCanvas.getContext('2d');
+                            annotationCtx.drawImage(annotationImg, 0, 0);
+                            const annotationImgData = annotationCanvas.toDataURL('image/png');
+                            pdf.addImage(annotationImgData, 'PNG', 0, 0, pdf.internal.pageSize.width, pdf.internal.pageSize.height);
+                            resolve();
+                        };
+                    });
+                }
+            }
+
+            pdf.save('annotated.pdf');
+        }
+
+        function goToPage() {
+            var pageNum = document.getElementById('pageInput').value;
+            var pageElement = document.getElementById(`pageContainer-${pageNum}`);
+            if (pageElement) {
+                pageElement.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        async function startRecording() {
+            const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+            const webcamStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const webcamVideo = document.getElementById('webcam');
+            webcamVideo.srcObject = webcamStream;
+            webcamVideo.style.display = 'block';
+
+            const combinedStream = new MediaStream([...stream.getTracks(), ...webcamStream.getTracks()]);
+            mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.start();
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop();
+            mediaRecorder.onstop = async () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                document.body.appendChild(a);
+                a.style = 'display: none';
+                a.href = url;
+                a.download = 'recording.webm';
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.getElementById('webcam').style.display = 'none';
+            };
+        }
+    </script>
+</body>
+</html>
